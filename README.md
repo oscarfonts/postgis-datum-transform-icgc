@@ -2,11 +2,10 @@
 
 Mètodes de transformació disponibles:
 
-* Transformació afí directa EPSG:23031 => EPSG:25831
-* Usar fitxer de malla NTv2 a PROJ.4
+1. Transformació oficial directa entre EPSG:23031 i EPSG:25831
+2. Usant fitxer de malla NTv2
 
 http://www.icgc.cat/ca/Administracio-i-empresa/Eines/Transformacio-de-coordenades-i-formats
-
 
 ## Punts de test
 
@@ -27,9 +26,9 @@ http://www.icgc.cat/ca/content/download/48760/337896/version/1/file/H2D_v8.pdf
       520000.000 4680000.000 => 520093.231 4680204.876
       420000.000 4600000.000 => 420093.993 4600204.241
 
-### Crear BDD amb els punts de test
+Podem crear una BDD de test a PostGIS amb aquests punts de test:
 
-Crear BDD:
+Crear BDD amb superusuari `postgres`:
 
 ```sql
 CREATE USER datumtest LOGIN PASSWORD 'datumtest' NOSUPERUSER INHERIT NOCREATEDB NOCREATEROLE;
@@ -38,7 +37,7 @@ CREATE DATABASE datumtest OWNER datumtest;
 CREATE EXTENSION postgis;
 ```
 
-Crear taules amb punts de test:
+Després, connectant-se amb l'usari `datumtest`:
 
 ```sql
 CREATE TABLE ed50_test_points (id serial, geom geometry(Point, 23031));
@@ -56,33 +55,34 @@ INSERT INTO etrs89_test_points (geom) VALUES
     (ST_GeomFromText('POINT(420000.000 4600000.000)', 25831));
 ```
 
-## Transformació afí
+## Transformació oficial directa entre EPSG:23031 i EPSG:25831
 
 ### A nivell de PROJ.4
 
-No està suportada:
+La millor opció seria incloure la transformació com una definició de PROJ.4 a la taula `spatial_ref_sys`. Malauradament, PROJ.4 no suporta transformacions d'aquest tipus entre sistemes projectats:
 
 http://osgeo-org.1560.x6.nabble.com/How-to-apply-an-affine-transformation-td3842074.html
 
 https://github.com/OSGeo/proj.4/issues/535
 
+### A nivell de SQL
 
-### A nivell de SQL PostGIS
+En canvi, PostGIS sí que proporciona una funció de tansformació afí, `ST_Affine`, que es pot aplicar a qualsevol geometria:
 
-Paràmetres oficials de la transformació d'ED50 a ETRS89:
+```sql
+ST_Affine(geom, a, b, d, e, xoff, yoff)
+```
+
+Veure: https://postgis.net/docs/ST_Affine.html
+
+Consultant el document oficial de la transformació de semblança de l'ICGC n'obtenim els següents paràmetres de transformació entre ED50 i ETRS89 (per a la projecció UTM, fus 31 N):
 
 * Tx: -129.549 m
 * Ty: -208.185 m
 * μ: 0.0000015504
 * α: -1,56504 " = -0.000007587528034836682 rad
 
-Funció de transformació Afí segons el manual de PostGIS:
-
-```sql
-ST_Affine(geom, a, b, d, e, xoff, yoff)
-```
-
-Substituïnt valors:
+Substituïnt valors als paràmetres tal com els anomena PostGIS, obtindriem:
 
 * a = (1+μ)·cos(α) = 1.0000015503712145
 * b = -(1+μ)·sin(α) = 0.000007587539798467343
@@ -91,20 +91,78 @@ Substituïnt valors:
 * xoff = Tx = -129.549
 * yoff = Ty = -208.185
 
-ST_Affine:
+Obtenim la funció ST_Affine:
 
 ```sql
-SELECT id, ST_AsEWKT(geom), ST_AsEWKT(ST_Affine(geom, 1.0000015503712145, 0.000007587539798467343, -0.000007587539798467343, 1.0000015503712145, -129.549, -208.185)) FROM ed50_test_points;
+ST_Affine(geom, 1.0000015503712145, 0.000007587539798467343, -0.000007587539798467343, 1.0000015503712145, -129.549, -208.185)
 ```
 
-Anàlogament, es pot definir la transformació ETRS89 => ED50 partint dels paràmetres donats per l'ICGC:
+Podem escriure una funció PLPGSQL que substitueixi totes les geometries d'una taula en EPSG:23031 cap a EPSG:25831:
+
+```sql
+-- Function: public.icgc_23031_to_25831(character varying, character varying, character varying)
+
+-- DROP FUNCTION public.icgc_23031_to_25831(character varying, character varying, character varying);
+
+CREATE OR REPLACE FUNCTION public.icgc_23031_to_25831(
+    schema_name character varying,
+    table_name character varying,
+    column_name character varying)
+  RETURNS text AS
+$BODY$
+DECLARE
+	real_schema name;
+	src_srid integer;
+	dst_srid integer;
+BEGIN
+	-- Set SRID values
+	src_srid := 23031;
+	dst_srid := 25831;
+	
+	-- Find, check or fix schema_name
+	IF ( schema_name != '' ) THEN
+		real_schema = schema_name;
+	ELSE
+		SELECT INTO real_schema current_schema()::text;
+	END IF;
+
+	-- Check original SRID
+	IF (SELECT count(*) = 0 FROM geometry_columns WHERE f_table_schema = real_schema AND f_table_name = table_name AND f_geometry_column = column_name AND srid = src_srid) THEN
+		RAISE EXCEPTION 'table original SRID not matching required SRID %', src_srid;
+		RETURN false;
+	END IF;
+
+	-- Set new SRID to table metadata
+	PERFORM updategeometrysrid(schema_name, table_name, column_name, dst_srid);
+
+	-- Reproject using affine transform
+	EXECUTE 'UPDATE ' || quote_ident(real_schema) || '.' || quote_ident(table_name) || ' SET ' || quote_ident(column_name) || ' = ST_Affine('|| quote_ident(column_name) ||', 1.0000015503712145, 0.000007587539798467343, -0.000007587539798467343, 1.0000015503712145, -129.549, -208.185)';
+
+	RETURN real_schema || '.' || table_name || '.' || column_name ||' datum transformed to ' || dst_srid::text;
+END;
+$BODY$
+  LANGUAGE plpgsql VOLATILE STRICT
+  COST 100;
+ALTER FUNCTION public.icgc_23031_to_25831(character varying, character varying, character varying)
+  OWNER TO datumtest;
+COMMENT ON FUNCTION public.icgc_23031_to_25831(character varying, character varying, character varying) IS 'args: schema_name, table_name, column_name - Transforms geometries in a table from EPSG:23031 to EPSG:25831 using the official catalan affine transform';
+```
+
+Aquesta funció s'usa així:
+
+```sql
+SELECT icgc_23031_to_25831('public', 'table_name', 'geom');
+```
+
+
+Anàlogament, es pot definir la transformació inversa, ETRS89 => ED50, partint dels paràmetres donats per l'ICGC:
 
 * Tx: 129.547 m
 * Ty: 208.186 m
 * μ: -0.0000015504
 * α: 1,56504 " = 0.000007587528034836682 rad
 
-Als paràmetres de la matriu de transformació afí:
+Els paràmetres de la matriu de transformació afí serien:
 
 * a = (1+μ)·cos(α) = 0.9999984495712146
 * b = -(1+μ)·sin(α) = -0.000007587516271060413
@@ -113,29 +171,35 @@ Als paràmetres de la matriu de transformació afí:
 * xoff = Tx = 129.547
 * yoff = Ty = 208.186
 
-ST_Affine:
+La funció ST_Affine quedaria escrita com:
 
 ```sql
-SELECT id, ST_AsEWKT(geom), ST_AsEWKT(ST_Affine(geom, 0.9999984495712146, -0.000007587516271060413, 0.000007587516271060413, 0.9999984495712146, 129.547, 208.186)) FROM etrs89_test_points;
+ST_Affine(geom, 0.9999984495712146, -0.000007587516271060413, 0.000007587516271060413, 0.9999984495712146, 129.547, 208.186)
 ```
 
-https://gis.stackexchange.com/questions/34612/changing-srid-of-existing-data-in-postgis
-
-https://postgis.net/docs/UpdateGeometrySRID.html
-
-https://postgis.net/docs/ST_SetSRID.html
+I, de la mateixa manera, es podria escriure una funció PLSQL per transformar inversament.
 
 
-## Malla NTv2
+## Usant fitxer de malla NTv2
 
-https://github.com/geomatico/postgis2.0-advanced/blob/master/tema2.rst
+En aquest cas, ens haurem de baixar el fitxer `100800401.gsb` de la web de l'ICGC (http://www.icgc.cat/ca/Administracio-i-empresa/Eines/Transformacio-de-coordenades-i-formats), i copiar-la al lloc on tinguem instal·lat PROJ.4.
+
+A Ubuntu 16.04 la ubicació és `/usr/share/proj`:
+
+```bash
+sudo cp 100800401.gsb /usr/share/proj
+```
+
+Llavors cal modificar la definició dels SRS a la taula `spatial_ref_sys`:
 
 ```sql
-SELECT * FROM spatial_ref_sys WHERE srid=23031 OR srid=25831;
+update spatial_ref_sys set proj4text = '+proj=utm +zone=31 +ellps=intl +units=m +no_defs +nadgrids=100800401.gsb' where srid = 23031;
+update spatial_ref_sys set proj4text = '+proj=longlat +ellps=intl +no_defs +nadgrids=100800401.gsb' where srid = 4230;
 ```
 
+Comprovació fent servir les taules d'exemple:
 
-
-Recursos:
-* https://www.avantgeo.com/transformar-de-ed50-a-etrs89-en-postgis/
-* http://www.icgc.cat/ca/Administracio-i-empresa/Eines/Transformacio-de-coordenades-i-formats/ETRS89/Accions/Forum-ETRS892/Problemes-transformacio-ED50-a-ETRS89
+```sql
+SELECT ST_AsEWKT(geom), ST_AsEWKT(ST_Transform(geom, 25831)) from ed50_test_points;
+SELECT ST_AsEWKT(geom), ST_AsEWKT(ST_Transform(geom, 23031)) from etrs89_test_points;
+```
