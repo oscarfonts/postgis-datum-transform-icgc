@@ -87,19 +87,37 @@ Substituïnt valors:
 * a = (1+μ)·cos(α) = 1.0000015503712145
 * b = -(1+μ)·sin(α) = 0.000007587539798467343
 * d = (1+μ)·sin(α) = -0.000007587539798467343
-* e = -(1+μ)·cos(α) = 1.0000015503712145
+* e = (1+μ)·cos(α) = 1.0000015503712145
 * xoff = Tx = -129.549
 * yoff = Ty = -208.185
 
-ST_Affine con la identidad:
+ST_Affine:
 
 ```sql
 SELECT id, ST_AsEWKT(geom), ST_AsEWKT(ST_Affine(geom, 1.0000015503712145, 0.000007587539798467343, -0.000007587539798467343, 1.0000015503712145, -129.549, -208.185)) FROM ed50_test_points;
 ```
 
+Anàlogament, es pot definir la transformació ETRS89 => ED50 partint dels paràmetres donats per l'ICGC:
 
+* Tx: 129.547 m
+* Ty: 208.186 m
+* μ: -0.0000015504
+* α: 1,56504 " = 0.000007587528034836682 rad
 
-https://postgis.net/docs/ST_Affine.html
+Als paràmetres de la matriu de transformació afí:
+
+* a = (1+μ)·cos(α) = 0.9999984495712146
+* b = -(1+μ)·sin(α) = -0.000007587516271060413
+* d = (1+μ)·sin(α) = 0.000007587516271060413
+* e = (1+μ)·cos(α) = 0.9999984495712146
+* xoff = Tx = 129.547
+* yoff = Ty = 208.186
+
+ST_Affine:
+
+```sql
+SELECT id, ST_AsEWKT(geom), ST_AsEWKT(ST_Affine(geom, 0.9999984495712146, -0.000007587516271060413, 0.000007587516271060413, 0.9999984495712146, 129.547, 208.186)) FROM etrs89_test_points;
+```
 
 https://gis.stackexchange.com/questions/34612/changing-srid-of-existing-data-in-postgis
 
@@ -121,5 +139,3 @@ SELECT * FROM spatial_ref_sys WHERE srid=23031 OR srid=25831;
 Recursos:
 * https://www.avantgeo.com/transformar-de-ed50-a-etrs89-en-postgis/
 * http://www.icgc.cat/ca/Administracio-i-empresa/Eines/Transformacio-de-coordenades-i-formats/ETRS89/Accions/Forum-ETRS892/Problemes-transformacio-ED50-a-ETRS89
-
-
